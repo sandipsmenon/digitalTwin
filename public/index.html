@@ -2,8 +2,13 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Digital Twin App</title>
+    <style>
+      /* Ensure full-bleed black background on mobile devices and comfortable default font sizing */
+      html, body, #root { height: 100%; background: #000; }
+      body { margin: 0; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+    </style>
   </head>
   <body>
     <div id="root"></div>
