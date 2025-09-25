@@ -1,660 +1,414 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, doc, addDoc, setDoc, deleteDoc, onSnapshot, collection, query } from 'firebase/firestore';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 
-// Global variables provided by the environment
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+// Single-file Digital Twin React app
+// - Uses Firebase for persistence/auth if window.__firebase_config is set
+// - Falls back to localStorage for transactions and auth otherwise
+// - Dynamically loads Tailwind and Chart.js
+// - Chatbot uses Gemini API if key is provided, otherwise returns mock responses
 
-// Helper function to get the base path for collections
-const getFirestoreBasePath = (userId) => `/artifacts/${appId}/users/${userId}`;
+const GEMINI_API_KEY = ""; // Provide key in environment if available
 
-const App = () => {
-  const [db, setDb] = useState(null);
-  const [auth, setAuth] = useState(null);
-  const [userId, setUserId] = useState(null);
-  const [userName] = useState('Ian Godding');
+const defaultCategories = [
+  'Food','Subscriptions','Transport','Fun','Health','Needs','Wants','Gambling','High-Risk Investments','Investment','Pension','Education','Savings','Travel'
+];
+
+const getLocalKey = (userId) => `digital-twin:${userId}:transactions`;
+
+const loadScript = (src, attrs = {}) => new Promise((res, rej) => {
+  if (document.querySelector(`script[src="${src}"]`)) return res();
+  const s = document.createElement('script');
+  s.src = src;
+  Object.entries(attrs).forEach(([k,v]) => s.setAttribute(k, v));
+  s.onload = () => res();
+  s.onerror = (e) => rej(e);
+  document.head.appendChild(s);
+});
+
+const DigitalTwin = () => {
+  const [userId, setUserId] = useState('local-user');
+  const [firebaseClient, setFirebaseClient] = useState(null); // { db, auth }
   const [transactions, setTransactions] = useState([]);
-  const [form, setForm] = useState({ amount: '', category: 'Food', date: new Date().toISOString().substring(0, 10) });
+  const [form, setForm] = useState({ amount: '', category: 'Food', date: new Date().toISOString().slice(0,10) });
   const [editingId, setEditingId] = useState(null);
   const [showConfetti, setShowConfetti] = useState(false);
   const [selectedPersona, setSelectedPersona] = useState('Current You');
   const [chatInput, setChatInput] = useState('');
   const [chatHistory, setChatHistory] = useState([]);
-  const [isChatLoading, setIsChatLoading] = useState(false);
-  const [isChartJsLoaded, setIsChartJsLoaded] = useState(false);
+  const [isChartLoaded, setIsChartLoaded] = useState(false);
+  const chartRef = useRef(null);
+  const chartInstance = useRef(null);
 
-  // --- Firestore Initialization and Authentication ---
+  // Load Tailwind + font for quick styling
   useEffect(() => {
-    try {
-      if (!firebaseConfig.apiKey) {
-        console.error("Firebase config is missing. Please check your environment.");
+    const tail = document.createElement('link');
+    tail.rel = 'stylesheet';
+    tail.href = 'https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css';
+    document.head.appendChild(tail);
+    const f = document.createElement('link');
+    f.rel = 'stylesheet';
+    f.href = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap';
+    document.head.appendChild(f);
+    document.documentElement.style.scrollBehavior = 'smooth';
+  }, []);
+
+  // Load Chart.js dynamically
+  useEffect(() => {
+    loadScript('https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js')
+      .then(() => setIsChartLoaded(true))
+      .catch((e) => console.warn('Chart.js failed to load', e));
+  }, []);
+
+  // Initialize Firebase if config is provided in window.__firebase_config
+  useEffect(() => {
+    const tryInitFirebase = async () => {
+      const cfg = typeof window !== 'undefined' ? window.__firebase_config : null;
+      const token = typeof window !== 'undefined' ? window.__initial_auth_token : null;
+      if (!cfg) {
+        // local-only mode
+        const uid = localStorage.getItem('digital-twin:local-user-id') || `local-${Math.random().toString(36).slice(2,9)}`;
+        localStorage.setItem('digital-twin:local-user-id', uid);
+        setUserId(uid);
         return;
       }
-      const app = initializeApp(firebaseConfig);
-      const authInstance = getAuth(app);
-      const dbInstance = getFirestore(app);
-      setDb(dbInstance);
-      setAuth(authInstance);
 
-      onAuthStateChanged(authInstance, async (user) => {
-        if (user) {
-          setUserId(user.uid);
-        } else {
-          try {
-            if (initialAuthToken) {
-              await signInWithCustomToken(authInstance, initialAuthToken);
-            } else {
-              await signInAnonymously(authInstance);
+      try {
+        // dynamic import of firebase modules
+        const { initializeApp } = await import('https://www.gstatic.com/firebasejs/9.22.1/firebase-app.js');
+        const authMod = await import('https://www.gstatic.com/firebasejs/9.22.1/firebase-auth.js');
+        const dbMod = await import('https://www.gstatic.com/firebasejs/9.22.1/firebase-firestore.js');
+        const app = initializeApp(cfg);
+        const auth = authMod.getAuth(app);
+        const db = dbMod.getFirestore(app);
+        setFirebaseClient({ auth, db });
+
+        authMod.onAuthStateChanged(auth, async (user) => {
+          if (user) setUserId(user.uid);
+          else {
+            try {
+              if (token) await authMod.signInWithCustomToken(auth, token);
+              else await authMod.signInAnonymously(auth);
+            } catch (e) {
+              console.warn('Firebase auth failed, using local mode', e);
+              const uid = localStorage.getItem('digital-twin:local-user-id') || `local-${Math.random().toString(36).slice(2,9)}`;
+              localStorage.setItem('digital-twin:local-user-id', uid);
+              setUserId(uid);
             }
-          } catch (error) {
-            console.error("Authentication failed:", error);
           }
-        }
-      });
-    } catch (error) {
-      console.error("Failed to initialize Firebase:", error);
+        });
+
+      } catch (e) {
+        console.warn('Firebase init failed', e);
+        const uid = localStorage.getItem('digital-twin:local-user-id') || `local-${Math.random().toString(36).slice(2,9)}`;
+        localStorage.setItem('digital-twin:local-user-id', uid);
+        setUserId(uid);
+      }
+    };
+    tryInitFirebase();
+  }, []);
+
+  // Load transactions from Firestore (if available) or localStorage
+  useEffect(() => {
+    const loadLocal = () => {
+      if (!userId) return;
+      const raw = localStorage.getItem(getLocalKey(userId));
+      if (raw) {
+        try { setTransactions(JSON.parse(raw)); } catch (e) { setTransactions([]); }
+      }
+    };
+
+    if (firebaseClient && firebaseClient.db && userId) {
+      (async () => {
+        try {
+          const { collection, query, onSnapshot } = await import('https://www.gstatic.com/firebasejs/9.22.1/firebase-firestore.js');
+          const q = query(collection(firebaseClient.db, `artifacts/digital-twin/users/${userId}/transactions`));
+          const unsubscribe = onSnapshot(q, snap => {
+            const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+            setTransactions(docs);
+          }, (err) => { console.warn('Firestore snapshot error', err); loadLocal(); });
+          return () => unsubscribe();
+        } catch (e) { console.warn(e); loadLocal(); }
+      })();
+    } else {
+      loadLocal();
     }
-  }, []);
+  }, [firebaseClient, userId]);
 
-  // --- Dynamic Script Loader for Chart.js ---
+  // Persist local transactions if not using Firestore
   useEffect(() => {
-    const script = document.createElement('script');
-    script.src = "https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js";
-    script.async = true;
-    script.onload = () => {
-      setIsChartJsLoaded(true);
-    };
-    script.onerror = () => {
-      console.error("Failed to load Chart.js script.");
-    };
-    document.body.appendChild(script);
+    if (!firebaseClient || !firebaseClient.db) {
+      if (userId) localStorage.setItem(getLocalKey(userId), JSON.stringify(transactions));
+    }
+  }, [transactions, firebaseClient, userId]);
 
-    return () => {
-      document.body.removeChild(script);
-    };
-  }, []);
-
-  // --- Firestore Data Listener ---
+  // Update pie chart when transactions or chart load changes
   useEffect(() => {
-    if (!db || !userId) return;
+    if (!isChartLoaded || !chartRef.current) return;
+    const Chart = window.Chart;
+    const pieData = (() => {
+      const categories = {};
+      transactions.forEach(t => {
+        const a = Number(t.amount || 0);
+        categories[t.category] = (categories[t.category] || 0) + a;
+      });
+      return {
+        labels: Object.keys(categories),
+        datasets: [{ data: Object.values(categories), backgroundColor: Object.keys(categories).map((_,i) => `hsl(${i*40} 80% 60%)`) }]
+      };
+    })();
 
-    const transactionCollectionPath = `${getFirestoreBasePath(userId)}/transactions`;
-    const q = query(collection(db, transactionCollectionPath));
+    if (chartInstance.current) {
+      chartInstance.current.data = pieData;
+      chartInstance.current.update();
+    } else {
+      chartInstance.current = new Chart(chartRef.current.getContext('2d'), { type:'pie', data: pieData, options:{ responsive:true } });
+    }
+  }, [isChartLoaded, transactions]);
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const fetchedTransactions = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-      setTransactions(fetchedTransactions);
-    }, (error) => {
-      console.error("Error fetching transactions:", error);
-    });
+  // Risk calculation (last 30 days)
+  const riskLabel = useMemo(() => {
+    const now = new Date();
+    const thirtyAgo = new Date(now.getTime() - 1000*60*60*24*30);
+    const recent = transactions.filter(t => new Date(t.date) > thirtyAgo);
+    const total = recent.reduce((s, t) => s + Number(t.amount || 0), 0);
+    const gambling = recent.filter(t => t.category === 'Gambling').reduce((s,t)=>s+Number(t.amount||0),0);
+    const highRisk = recent.filter(t => t.category === 'High-Risk Investments').reduce((s,t)=>s+Number(t.amount||0),0);
+    const pct = total === 0 ? 0 : ((gambling + highRisk) / total) * 100;
+    if (pct > 10) return 'Extremely High Risk';
+    if (pct > 5) return 'High Risk';
+    if (pct > 1) return 'Moderate Risk';
+    return 'Low Risk';
+  }, [transactions]);
 
-    return () => unsubscribe();
-  }, [db, userId]);
-
-  // --- Transaction Handlers ---
-  const handleInputChange = (e) => {
-    const { name, value } = e.target;
-    setForm(prev => ({ ...prev, [name]: value }));
+  // Persistence helpers
+  const saveToBackend = async (tx) => {
+    if (firebaseClient && firebaseClient.db) {
+      try {
+        const { collection, addDoc } = await import('https://www.gstatic.com/firebasejs/9.22.1/firebase-firestore.js');
+        await addDoc(collection(firebaseClient.db, `artifacts/digital-twin/users/${userId}/transactions`), tx);
+        return;
+      } catch (e) { console.warn('Firestore save failed', e); }
+    }
+    // fallback: local state
+    setTransactions(prev => [{ ...tx, id: `local-${Date.now()}` }, ...prev]);
   };
+
+  const updateBackend = async (id, tx) => {
+    if (firebaseClient && firebaseClient.db) {
+      try {
+        const { doc, setDoc } = await import('https://www.gstatic.com/firebasejs/9.22.1/firebase-firestore.js');
+        await setDoc(doc(firebaseClient.db, `artifacts/digital-twin/users/${userId}/transactions`, id), tx);
+        return;
+      } catch (e) { console.warn('Firestore update failed', e); }
+    }
+    setTransactions(prev => prev.map(p => p.id === id ? { ...p, ...tx } : p));
+  };
+
+  const deleteFromBackend = async (id) => {
+    if (firebaseClient && firebaseClient.db) {
+      try {
+        const { doc, deleteDoc } = await import('https://www.gstatic.com/firebasejs/9.22.1/firebase-firestore.js');
+        await deleteDoc(doc(firebaseClient.db, `artifacts/digital-twin/users/${userId}/transactions`, id));
+        return;
+      } catch (e) { console.warn('Firestore delete failed', e); }
+    }
+    setTransactions(prev => prev.filter(p => p.id !== id));
+  };
+
+  // Handlers
+  const handleInput = (e) => setForm(prev => ({ ...prev, [e.target.name]: e.target.value }));
 
   const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!db || !userId) return;
-
-    try {
-      const transactionData = {
-        amount: parseFloat(form.amount),
-        category: form.category,
-        date: form.date,
-        timestamp: new Date().toISOString()
-      };
-
-      if (editingId) {
-        await setDoc(doc(db, `${getFirestoreBasePath(userId)}/transactions`, editingId), transactionData);
-        setEditingId(null);
-      } else {
-        await addDoc(collection(db, `${getFirestoreBasePath(userId)}/transactions`), transactionData);
-        setShowConfetti(true);
-        setTimeout(() => setShowConfetti(false), 2000);
-      }
-      setForm({ amount: '', category: 'Food', date: new Date().toISOString().substring(0, 10) });
-    } catch (error) {
-      console.error("Error adding/updating transaction:", error);
+    e && e.preventDefault && e.preventDefault();
+    const payload = { amount: Number(form.amount || 0), category: form.category, date: form.date || new Date().toISOString().slice(0,10), timestamp: new Date().toISOString() };
+    if (editingId) {
+      await updateBackend(editingId, payload);
+      setEditingId(null);
+    } else {
+      await saveToBackend(payload);
+      setShowConfetti(true);
+      setTimeout(() => setShowConfetti(false), 1800);
     }
+    setForm({ amount: '', category: 'Food', date: new Date().toISOString().slice(0,10) });
   };
 
-  const handleEdit = (transaction) => {
-    setForm({
-      amount: transaction.amount.toString(),
-      category: transaction.category,
-      date: transaction.date
-    });
-    setEditingId(transaction.id);
+  const handleEdit = (tx) => {
+    setForm({ amount: String(tx.amount || ''), category: tx.category, date: tx.date });
+    setEditingId(tx.id);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleDelete = async (id) => {
-    if (!db || !userId) return;
-    try {
-      console.log(`Deleting transaction with ID: ${id}`);
-      await deleteDoc(doc(db, `${getFirestoreBasePath(userId)}/transactions`, id));
-    } catch (error) {
-      console.error("Error deleting transaction:", error);
-    }
+    if (!confirm('Delete this transaction?')) return;
+    await deleteFromBackend(id);
   };
 
-  // --- Data Analysis and Visualization ---
-  const { spendingByCategories, totalSpending, riskLabel } = useMemo(() => {
-    const now = new Date();
-    const thirtyDaysAgo = new Date(now.setDate(now.getDate() - 30));
-    const recentTransactions = transactions.filter(t => new Date(t.date) > thirtyDaysAgo);
+  // Chatbot logic (call Gemini if key provided)
+  const personas = {
+    'Current You': "You are a financial analyst. Provide concise, practical observations grounded in the user's spending data.",
+    'Good Twin': "You are an encouraging financial coach. Provide gentle, actionable tips to save and grow wealth.",
+    'Evil Twin': "You are a mischievous advisor encouraging risky fun. Always include a disclaimer: not financial advice."
+  };
 
-    const categories = recentTransactions.reduce((acc, curr) => {
-      acc[curr.category] = (acc[curr.category] || 0) + curr.amount;
-      return acc;
-    }, {});
-
-    const total = Object.values(categories).reduce((sum, amount) => sum + amount, 0);
-
-    const getRiskLabel = () => {
-      if (total === 0) return 'No Spending Data';
-      const funSpending = categories['Fun'] || 0;
-      const gamblingSpending = categories['Gambling'] || 0;
-      const highRiskSpending = categories['High-Risk Investments'] || 0;
-      const wantsSpending = (categories['Wants'] || 0) + (categories['Subscriptions'] || 0) + (categories['Fun'] || 0);
-      const gamblingPercentage = ((gamblingSpending + highRiskSpending) / total) * 100;
-      const wantsPercentage = (wantsSpending / total) * 100;
-
-      if (gamblingPercentage > 10) return 'Extremely High Risk';
-      if (gamblingPercentage > 5 || wantsPercentage > 50) return 'High Risk';
-      if (gamblingPercentage > 1 || wantsPercentage > 30) return 'Moderate Risk';
-      return 'Low Risk';
-    };
-
-    return {
-      spendingByCategories: categories,
-      totalSpending: total,
-      riskLabel: getRiskLabel()
-    };
-  }, [transactions]);
-
-  const pieChartData = useMemo(() => {
-    const categoryNames = Object.keys(spendingByCategories);
-    const categoryAmounts = Object.values(spendingByCategories);
-    return {
-      labels: categoryNames,
-      datasets: [
-        {
-          data: categoryAmounts,
-          backgroundColor: categoryNames.map((_, i) => `hsl(${i * 30 + 200}, 50%, 50%)`),
-          borderColor: '#1f2937',
-          borderWidth: 2,
-        },
-      ],
-    };
-  }, [spendingByCategories]);
-
-  // --- Chatbot Logic with LLM Integration ---
   const callGeminiAPI = async (userPrompt) => {
-    const personas = {
-      'Current You': "You are a financial analyst. Provide a response of no more than 3 lines. Provide a concise, single-paragraph summary of the key financial findings, using the user's transaction data to ground your advice.",
-      'Good Twin': "You are an encouraging and positive financial coach. Provide a response of no more than 3 lines. Provide inspiring, actionable advice for building wealth and making smart financial choices. Avoid being overly strict or preachy.",
-      'Evil Twin': "You are a mischievous financial advisor with a flair for the dramatic. You encourage risky, fun, and impulsive spending. Provide a response of no more than 3 lines. Your advice should be exciting and rebellious, but always include a disclaimer that it's 'not financial advice'."
-    };
+    if (!GEMINI_API_KEY) {
+      return { text: `(No Gemini API key) Mock reply for: ${userPrompt}`, sources: [] };
+    }
 
     const systemPrompt = personas[selectedPersona] || personas['Current You'];
-    const formattedPrompt = `${userPrompt}. You can also use the user's spending data for context: ${JSON.stringify(spendingByCategories)} and their total spending: £${totalSpending.toFixed(2)}.`;
-
-    const payload = {
-      contents: [{ parts: [{ text: formattedPrompt }] }],
-      tools: [{ "google_search": {} }],
-      systemInstruction: { parts: [{ text: systemPrompt }] },
-    };
-    const apiKey = "";
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
-
+    const payload = { contents:[{ parts:[{ text: userPrompt }] }], systemInstruction:{ parts:[{ text: systemPrompt }] }, tools:[{ google_search:{} }] };
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${GEMINI_API_KEY}`;
     try {
-      const response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      if (!response.ok) {
-        throw new Error(`API call failed with status: ${response.status}`);
-      }
-      const result = await response.json();
-      const candidate = result.candidates?.[0];
-
-      if (candidate && candidate.content?.parts?.[0]?.text) {
-        const text = candidate.content.parts[0].text;
-        const groundingMetadata = candidate.groundingMetadata;
-        let sources = [];
-        if (groundingMetadata && groundingMetadata.groundingAttributions) {
-            sources = groundingMetadata.groundingAttributions
-                .map(attribution => ({ uri: attribution.web?.uri, title: attribution.web?.title }))
-                .filter(source => source.uri && source.title);
-        }
-        return { text, sources };
-      }
-      return { text: "I'm sorry, I couldn't generate a response at this time." };
-    } catch (error) {
-      console.error("Gemini API call error:", error);
-      return { text: "There was an error connecting to the financial twin. Please try again." };
+      const res = await fetch(url, { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(payload) });
+      if (!res.ok) throw new Error('LLM call failed');
+      const json = await res.json();
+      const cand = json.candidates?.[0];
+      const text = cand?.content?.parts?.[0]?.text || 'No response';
+      const sources = cand?.groundingMetadata?.groundingAttributions?.map(a => ({ title: a.web?.title, uri: a.web?.uri })).filter(Boolean) || [];
+      return { text, sources };
+    } catch (e) {
+      console.warn(e);
+      return { text: 'Error contacting Gemini.', sources: [] };
     }
   };
 
-  const handleChatSubmit = async () => {
-    if (!chatInput.trim()) return;
-
-    const userMessage = { role: 'user', personaName: 'You', text: chatInput };
-    setChatHistory(prev => [...prev, userMessage]);
+  const sendChat = async (question) => {
+    if (!question || !String(question).trim()) return;
+    const userMsg = { role: 'user', personaName: 'You', text: question };
+    setChatHistory(prev => [...prev, userMsg]);
     setChatInput('');
-    setIsChatLoading(true);
-
-    const botResponse = await callGeminiAPI(chatInput);
-    const botMessage = { role: 'bot', personaName: selectedPersona, text: botResponse.text, sources: botResponse.sources };
-    setChatHistory(prev => [...prev, botMessage]);
-    setIsChatLoading(false);
+    const bot = await callGeminiAPI(question);
+    setChatHistory(prev => [...prev, { role: 'bot', personaName: selectedPersona, text: bot.text, sources: bot.sources }]);
   };
 
-  const handleDefaultQuestionClick = (question) => {
-    setChatInput(question);
-    handleChatSubmit();
-  };
+  const presetQuestions = ['Gambling problem?', 'Investments?', "How's my lifestyle?", 'How to save more?'];
 
-  // --- UI Components ---
-  const Confetti = () => (
-    <div className={`absolute inset-0 z-50 pointer-events-none transition-opacity duration-1000 ${showConfetti ? 'opacity-100' : 'opacity-0'}`}>
-      <svg width="100%" height="100%" className="confetti-svg absolute inset-0">
-        {[...Array(100)].map((_, i) => {
-          const x = Math.random() * 100;
-          const y = Math.random() * 100;
-          const size = Math.random() * 8 + 4;
-          const color = `hsl(${Math.random() * 360}, 100%, 80%)`;
-          const duration = Math.random() * 1 + 1.5;
-          const delay = Math.random() * 0.5;
-          const opacity = Math.random() * 0.5 + 0.5;
-          return (
-            <circle
-              key={i}
-              cx={`${x}%`} cy={`${y}%`} r={size}
-              fill={color} opacity={opacity}
-              style={{
-                animation: `confetti-fall ${duration}s ease-in-out forwards`,
-                animationDelay: `${delay}s`,
-              }}
-            />
-          );
-        })}
-      </svg>
-    </div>
-  );
-
-  const FinancialRiskAvatar = ({ risk }) => {
-    let auraColor = 'from-gray-700 to-gray-900';
-    let labelColor = 'text-gray-400';
-    let twinLabel = 'Digital Twin';
-    let avatarColor = 'bg-gray-700';
-    let textColor = 'text-gray-400';
-
-    switch (risk) {
-      case 'Low Risk':
-        auraColor = 'from-blue-600 to-cyan-600';
-        labelColor = 'text-cyan-400';
-        twinLabel = 'Your Good Twin';
-        avatarColor = 'bg-gray-700';
-        textColor = 'text-gray-200';
-        break;
-      case 'Moderate Risk':
-        auraColor = 'from-yellow-500 to-orange-500';
-        labelColor = 'text-yellow-400';
-        twinLabel = 'Your Balanced Twin';
-        avatarColor = 'bg-gray-700';
-        textColor = 'text-gray-200';
-        break;
-      case 'High Risk':
-        auraColor = 'from-red-600 to-red-800';
-        labelColor = 'text-red-400';
-        twinLabel = 'Your Risky Twin';
-        avatarColor = 'bg-gray-700';
-        textColor = 'text-gray-200';
-        break;
-      case 'Extremely High Risk':
-        auraColor = 'from-red-900 to-gray-900';
-        labelColor = 'text-red-400';
-        twinLabel = 'Your Evil Twin';
-        avatarColor = 'bg-gray-700';
-        textColor = 'text-gray-200';
-        break;
-      default:
-        // Default colors are set at the top
-    }
-
-    const pulseStyle = {
-      animation: risk === 'Extremely High Risk' ? 'pulse-custom 1.5s infinite' : 'none',
-    };
-
+  // Confetti component
+  const Confetti = () => {
+    const pieces = Array.from({length:60}).map((_,i)=>({ id:i, left: Math.random()*100, delay: Math.random()*0.6, size: Math.random()*8+6, color:`hsl(${Math.random()*360} 90% 65%)` }));
     return (
-      <div className="relative flex flex-col items-center">
-        <div className={`relative w-36 h-36 rounded-full flex items-center justify-center p-1 bg-gradient-to-br ${auraColor}`}
-          style={pulseStyle}>
-          <div className={`w-full h-full ${avatarColor} rounded-full flex items-center justify-center`}>
-            <span className={`text-6xl ${textColor}`}>👤</span>
-          </div>
+      <div className={`pointer-events-none fixed inset-0 z-50 ${showConfetti ? 'opacity-100' : 'opacity-0'} transition-opacity`} aria-hidden>
+        <div className="absolute inset-0 overflow-hidden">
+          {pieces.map(p => (
+            <div key={p.id} style={{ left:`${p.left}%`, top:'-10%', position:'absolute', animation:`fall 1.8s ${p.delay}s linear forwards` }}>
+              <div style={{ width:p.size, height:p.size, background:p.color, borderRadius:6, opacity:0.95 }} />
+            </div>
+          ))}
         </div>
-        <div className={`mt-4 px-4 py-2 rounded-full font-bold text-sm ${labelColor} bg-slate-800/80 backdrop-blur-sm shadow-lg`}>
-          <p>{twinLabel}</p>
-          <p className="text-xs">{risk}</p>
-        </div>
-      </div>
-    );
-  };
-
-  const PieChart = ({ data, isChartJsLoaded }) => {
-    const chartRef = useRef(null);
-    const chartInstanceRef = useRef(null);
-
-    useEffect(() => {
-      if (chartRef.current && isChartJsLoaded) {
-        if (chartInstanceRef.current) {
-          chartInstanceRef.current.data = data;
-          chartInstanceRef.current.update();
-        } else {
-          const ctx = chartRef.current.getContext('2d');
-          chartInstanceRef.current = new window.Chart(ctx, {
-            type: 'pie',
-            data: data,
-            options: {
-              responsive: true,
-              maintainAspectRatio: false,
-              plugins: {
-                legend: {
-                  position: 'top',
-                  labels: {
-                    font: { family: 'Inter, sans-serif' },
-                    color: '#9ca3af'
-                  }
-                }
-              }
-            }
-          });
-        }
-      }
-
-      return () => {
-        if (chartInstanceRef.current) {
-          chartInstanceRef.current.destroy();
-          chartInstanceRef.current = null;
-        }
-      };
-    }, [data, isChartJsLoaded]);
-
-    return (
-      <div className="h-64 md:h-80 flex items-center justify-center">
-        {isChartJsLoaded ? (
-          <canvas ref={chartRef} id="pie-chart" className="w-full h-full"></canvas>
-        ) : (
-          <p className="text-gray-500">Loading chart...</p>
-        )}
+        <style>{`@keyframes fall { to { transform: translateY(120vh) rotate(540deg); opacity: 0; } }`}</style>
       </div>
     );
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-gray-200 p-4 font-sans relative">
-      {/* Tailwind should be loaded via your HTML template (public/index.html) for a cleaner setup. */}
-
-      <div className="max-w-4xl mx-auto space-y-8 pb-16">
-        <header className="text-center pt-8 pb-4">
-          <h1 className="text-5xl md:text-6xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-cyan-400 tracking-tight">
-            Digital Twin
-          </h1>
-          <p className="mt-2 text-lg text-gray-400">Welcome, {userName}.</p>
-          {userId && (
-            <div className="mt-4 text-sm text-gray-500 break-all">
-              User ID: <span className="font-mono text-gray-400">{userId}</span>
-            </div>
-          )}
+    <div className="min-h-screen bg-slate-900 text-gray-100 p-4" style={{ fontFamily: 'Inter, system-ui, sans-serif' }}>
+      <div className="max-w-5xl mx-auto">
+        <header className="text-center py-8">
+          <h1 className="text-4xl md:text-6xl font-extrabold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-cyan-400">Digital Twin</h1>
+          <p className="mt-2 text-gray-300">Personal financial dashboard • £ (GBP)</p>
         </header>
 
-        {/* Confetti animation */}
         {showConfetti && <Confetti />}
 
-        {/* --- Spending Tracker --- */}
-        <section className="bg-slate-800/60 backdrop-blur-md rounded-3xl p-6 shadow-xl border border-slate-700">
-          <h2 className="text-3xl font-bold text-center mb-6 text-gray-100">Log a Transaction</h2>
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label htmlFor="amount" className="block text-sm font-medium text-gray-400">Amount (£)</label>
-                <input
-                  type="number"
-                  name="amount"
-                  id="amount"
-                  value={form.amount}
-                  onChange={handleInputChange}
-                  required
-                  className="mt-1 block w-full rounded-xl border-slate-600 shadow-sm bg-slate-700/50 text-gray-100 transition-colors focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-                />
-              </div>
-              <div>
-                <label htmlFor="category" className="block text-sm font-medium text-gray-400">Category</label>
-                <select
-                  name="category"
-                  id="category"
-                  value={form.category}
-                  onChange={handleInputChange}
-                  required
-                  className="mt-1 block w-full rounded-xl border-slate-600 shadow-sm bg-slate-700/50 text-gray-100 transition-colors focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-                >
-                  <option>Food</option>
-                  <option>Subscriptions</option>
-                  <option>Transport</option>
-                  <option>Fun</option>
-                  <option>Health</option>
-                  <option>Needs</option>
-                  <option>Wants</option>
-                  <option>Gambling</option>
-                  <option>High-Risk Investments</option>
-                  <option>Investment</option>
-                  <option>Pension</option>
-                  <option>Education</option>
-                  <option>Savings</option>
-                  <option>Travel</option>
-                </select>
-              </div>
-              <div className="md:col-span-2">
-                <label htmlFor="date" className="block text-sm font-medium text-gray-400">Date</label>
-                <input
-                  type="date"
-                  name="date"
-                  id="date"
-                  value={form.date}
-                  onChange={handleInputChange}
-                  required
-                  className="mt-1 block w-full rounded-xl border-slate-600 shadow-sm bg-slate-700/50 text-gray-100 transition-colors focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-                />
-              </div>
+        <main className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <section className="lg:col-span-2 space-y-6">
+            <div className="bg-slate-800 rounded-2xl p-6 shadow">
+              <h2 className="text-2xl font-semibold mb-4">Log a Transaction</h2>
+              <form onSubmit={handleSubmit} className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <input name="amount" value={form.amount} onChange={handleInput} placeholder="Amount (£)" type="number" className="p-2 rounded-lg bg-slate-700/60 text-gray-100" required />
+                  <select name="category" value={form.category} onChange={handleInput} className="p-2 rounded-lg bg-slate-700/60 text-gray-100">
+                    {defaultCategories.map(c => <option key={c}>{c}</option>)}
+                  </select>
+                  <input name="date" type="date" value={form.date} onChange={handleInput} className="p-2 rounded-lg bg-slate-700/60 text-gray-100" />
+                </div>
+                <div className="flex gap-3">
+                  <button type="submit" className="px-4 py-2 rounded-lg bg-gradient-to-r from-blue-500 to-cyan-500 font-semibold">{editingId ? 'Update' : 'Add Transaction'}</button>
+                  {editingId && <button type="button" onClick={() => { setEditingId(null); setForm({ amount:'', category:'Food', date:new Date().toISOString().slice(0,10) }); }} className="px-4 py-2 rounded-lg bg-slate-700">Cancel</button>}
+                </div>
+              </form>
             </div>
-            <button
-              type="submit"
-              className="w-full py-3 px-6 rounded-2xl text-white font-semibold shadow-lg transition-all transform hover:scale-105 active:scale-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 bg-gradient-to-r from-blue-500 to-cyan-500"
-            >
-              {editingId ? 'Update Transaction' : 'Add Transaction'}
-            </button>
-          </form>
-        </section>
 
-        {/* --- Data Visualization & Risk Assessment --- */}
-        <section className="grid grid-cols-1 md:grid-cols-2 gap-8">
-          <div className="bg-slate-800/60 backdrop-blur-md rounded-3xl p-6 shadow-xl border border-slate-700 flex flex-col items-center justify-center">
-            <h2 className="text-3xl font-bold mb-4 text-center text-gray-100">Spending Breakdown</h2>
-            <div className="w-full max-w-sm h-64 md:h-80">
-              <PieChart data={pieChartData} isChartJsLoaded={isChartJsLoaded} />
+            <div className="bg-slate-800 rounded-2xl p-6 shadow">
+              <h2 className="text-2xl font-semibold mb-4">Transaction History</h2>
+              <div className="overflow-auto max-h-96">
+                <table className="w-full text-sm">
+                  <thead className="text-left text-gray-400 sticky top-0 bg-slate-800/80">
+                    <tr><th className="p-2">Date</th><th className="p-2">Amount</th><th className="p-2">Category</th><th className="p-2">Actions</th></tr>
+                  </thead>
+                  <tbody>
+                    {[...transactions].sort((a,b)=>new Date(b.date)-new Date(a.date)).map(tx => (
+                      <tr key={tx.id} className="border-t border-slate-700">
+                        <td className="p-2 align-top">{tx.date}</td>
+                        <td className="p-2 align-top">£{Number(tx.amount||0).toFixed(2)}</td>
+                        <td className="p-2 align-top">{tx.category}</td>
+                        <td className="p-2 align-top">
+                          <button onClick={()=>handleEdit(tx)} className="text-cyan-300 mr-2">Edit</button>
+                          <button onClick={()=>handleDelete(tx.id)} className="text-red-400">Delete</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
-          </div>
-          <div className="bg-slate-800/60 backdrop-blur-md rounded-3xl p-6 shadow-xl border border-slate-700 flex flex-col items-center justify-center">
-            <h2 className="text-3xl font-bold mb-4 text-center text-gray-100">Your Twin's Vibe</h2>
-            <FinancialRiskAvatar risk={riskLabel} />
-            <div className="mt-6 text-center text-sm text-gray-400">
-              <p>Your current financial vibe is <strong className="text-white">{riskLabel}</strong>.</p>
-              <p>This is based on your spending habits over the last 30 days.</p>
-            </div>
-          </div>
-        </section>
 
-        {/* --- Transaction History --- */}
-        <section className="bg-slate-800/60 backdrop-blur-md rounded-3xl p-6 shadow-xl border border-slate-700">
-          <h2 className="text-3xl font-bold text-center mb-6 text-gray-100">Transaction History</h2>
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-slate-700">
-              <thead className="bg-slate-700/70">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Date</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Amount</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Category</th>
-                  <th className="relative px-6 py-3"><span className="sr-only">Actions</span></th>
-                </tr>
-              </thead>
-              <tbody className="bg-slate-800/70 divide-y divide-slate-700">
-                {[...transactions].sort((a, b) => new Date(b.date) - new Date(a.date)).map((tx) => (
-                  <tr key={tx.id} className="hover:bg-slate-700/50 transition-colors">
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-100">{tx.date}</td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-100">£{(tx.amount ?? 0).toFixed(2)}</td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-100">{tx.category}</td>
-                    <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                      <button
-                        onClick={() => handleEdit(tx)}
-                        className="text-blue-400 hover:text-cyan-400 mr-4"
-                      >
-                        Edit
-                      </button>
-                      <button
-                        onClick={() => handleDelete(tx.id)}
-                        className="text-red-400 hover:text-red-200"
-                      >
-                        Delete
-                      </button>
-                    </td>
-                  </tr>
+          </section>
+
+          <aside className="space-y-6">
+            <div className="bg-slate-800 rounded-2xl p-6 shadow text-center">
+              <h3 className="text-lg font-semibold">Your Twin's Vibe</h3>
+              <div className="my-4 flex flex-col items-center">
+                <div className={`w-32 h-32 rounded-full flex items-center justify-center mb-3 ${riskLabel === 'Extremely High Risk' ? 'animate-pulse' : ''}`} style={{ background: riskLabel === 'Low Risk' ? 'linear-gradient(135deg,#60a5fa,#06b6d4)' : riskLabel === 'Moderate Risk' ? 'linear-gradient(135deg,#f59e0b,#fb923c)' : 'linear-gradient(135deg,#ef4444,#b91c1c)' }}>
+                  <div className="w-28 h-28 bg-slate-900 rounded-full flex items-center justify-center text-3xl">👤</div>
+                </div>
+                <div className="text-sm text-gray-300"><strong className="text-white">{riskLabel}</strong></div>
+                <div className="mt-2 text-xs text-gray-400">Based on last 30 days</div>
+              </div>
+            </div>
+
+            <div className="bg-slate-800 rounded-2xl p-6 shadow">
+              <h3 className="text-lg font-semibold mb-3">Spending Breakdown</h3>
+              <div className="w-full h-48">
+                {isChartLoaded ? <canvas ref={chartRef} /> : <div className="text-gray-400">Loading chart...</div>}
+              </div>
+            </div>
+
+            <div className="bg-slate-800 rounded-2xl p-6 shadow">
+              <h3 className="text-lg font-semibold mb-3">Talk to Your Twin</h3>
+              <div className="flex gap-2 mb-3">
+                {Object.keys(personas).map(p => (
+                  <button key={p} onClick={()=>setSelectedPersona(p)} className={`px-3 py-1 rounded-full ${selectedPersona===p? 'bg-gradient-to-r from-blue-500 to-cyan-500 text-white':'bg-slate-700 text-gray-200'}`}>{p}</button>
                 ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
+              </div>
 
-        {/* --- Chatbot Section --- */}
-        <section className="bg-slate-800/60 backdrop-blur-md rounded-3xl p-6 shadow-xl border border-slate-700">
-          <h2 className="text-3xl font-bold text-center mb-6 text-gray-100">Talk to Your Twin</h2>
-          <div className="flex justify-center mb-6 space-x-2">
-            {['Current You', 'Good Twin', 'Evil Twin'].map(persona => (
-              <button
-                key={persona}
-                onClick={() => setSelectedPersona(persona)}
-                className={`py-2 px-4 rounded-full font-semibold transition-all shadow-lg ${selectedPersona === persona ? 'bg-gradient-to-r from-blue-500 to-cyan-500 text-white transform scale-105' : 'bg-slate-700 text-gray-200 hover:bg-slate-600'}`}
-              >
-                {persona}
-              </button>
-            ))}
-          </div>
-          
-          <div className="mb-4 flex flex-wrap gap-2 justify-center">
-            {['Gambling problem?', 'Investments?', 'How\'s my lifestyle?', 'How to save more?'].map((question) => (
-              <button
-                key={question}
-                onClick={() => handleDefaultQuestionClick(question)}
-                className="py-1 px-3 rounded-full text-xs font-medium bg-slate-700 text-gray-400 hover:bg-slate-600 transition-colors"
-              >
-                {question}
-              </button>
-            ))}
-          </div>
+              <div className="flex flex-wrap gap-2 mb-3">
+                {presetQuestions.map(q => (
+                  <button key={q} onClick={()=>sendChat(q)} className="text-xs px-2 py-1 rounded-full bg-slate-700 text-gray-300">{q}</button>
+                ))}
+              </div>
 
-          <div className="h-96 overflow-y-auto p-4 border rounded-2xl mb-4 bg-slate-900/60 border-slate-700">
-            {chatHistory.map((msg, index) => (
-              <div key={index} className={`mb-2 p-3 rounded-xl max-w-[80%] ${msg.role === 'user' ? 'bg-slate-700 self-end ml-auto' : 'bg-slate-600 self-start mr-auto'}`}>
-                <p className="font-bold text-sm mb-1">{msg.personaName}</p>
-                <p>{msg.text}</p>
-                {msg.sources && msg.sources.length > 0 && (
-                  <div className="mt-2 text-xs text-gray-400">
-                    <p>Sources:</p>
-                    <ul>
-                      {msg.sources.map((source, i) => (
-                        <li key={i}>
-                          <a href={source.uri} target="_blank" rel="noopener noreferrer" className="underline hover:text-gray-200 transition-colors">
-                            {source.title}
-                          </a>
-                        </li>
-                      ))}
-                    </ul>
+              <div className="h-40 overflow-auto mb-3 p-2 bg-slate-900/60 rounded">
+                {chatHistory.map((m,i)=> (
+                  <div key={i} className={`mb-2 ${m.role==='user' ? 'text-right':'text-left'}`}>
+                    <div className={`inline-block px-3 py-2 rounded ${m.role==='user' ? 'bg-slate-700 text-white':'bg-slate-600 text-white'}` }>{m.personaName}: {m.text}</div>
+                    {m.sources && m.sources.length>0 && <div className="text-xs text-gray-400">Sources: {m.sources.map(s=> <a key={s.uri} href={s.uri} className="underline ml-1" target="_blank" rel="noreferrer">{s.title||s.uri}</a>)}</div>}
                   </div>
-                )}
+                ))}
               </div>
-            ))}
-            {isChatLoading && (
-              <div className="flex justify-center mt-4">
-                <div className="w-6 h-6 rounded-full border-2 border-blue-400 border-t-blue-600 animate-spin"></div>
-              </div>
-            )}
-          </div>
-          <div className="flex space-x-2">
-            <input
-              type="text"
-              value={chatInput}
-              onChange={(e) => setChatInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleChatSubmit()}
-              placeholder={`Ask your ${selectedPersona} anything...`}
-              className="flex-1 rounded-2xl border-slate-600 shadow-sm bg-slate-700/50 text-gray-100 focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-            />
-            <button
-              onClick={handleChatSubmit}
-              className="py-2 px-6 rounded-2xl text-white font-semibold shadow-lg transition-all transform hover:scale-105 active:scale-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 bg-gradient-to-r from-blue-500 to-cyan-500"
-            >
-              Send
-            </button>
-          </div>
-        </section>
 
+              <div className="flex gap-2">
+                <input value={chatInput} onChange={(e)=>setChatInput(e.target.value)} onKeyDown={(e)=>e.key==='Enter' && sendChat(chatInput)} className="flex-1 p-2 rounded bg-slate-700/60 text-gray-100" placeholder={`Ask your ${selectedPersona}...`} />
+                <button onClick={()=>sendChat(chatInput)} className="px-3 py-2 rounded bg-gradient-to-r from-blue-500 to-cyan-500">Send</button>
+              </div>
+            </div>
+          </aside>
+
+        </main>
+
+        <footer className="text-center text-xs text-gray-500 mt-8">Built with ❤️ • Data persisted to Firebase when configured, otherwise stored locally in your browser.</footer>
       </div>
-      <style>
-        {`
-        body {
-          font-family: 'Inter', sans-serif;
-        }
-
-        @keyframes pulse-custom {
-          0%, 100% { box-shadow: 0 0 50px 10px rgba(239, 68, 68, 0.5); }
-          50% { box-shadow: 0 0 80px 20px rgba(239, 68, 68, 0.8); }
-        }
-
-        @keyframes confetti-fall {
-          0% { transform: translateY(-100vh) rotate(0deg); opacity: 1; }
-          100% { transform: translateY(100vh) rotate(720deg); opacity: 0; }
-        }
-
-        .confetti-svg {
-          position: absolute;
-          top: 0;
-          left: 0;
-          width: 100%;
-          height: 100%;
-          pointer-events: none;
-        }
-
-        .confetti-svg circle {
-          /* Use forwards so each piece falls once */
-          animation: confetti-fall 2s ease-in-out forwards;
-        }
-        `}
-      </style>
     </div>
   );
 };
 
-export default App;
+export default DigitalTwin;
