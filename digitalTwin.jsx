@@ -415,7 +415,9 @@ const DigitalTwin = () => {
               <h3 className="text-lg font-semibold">Your Twin's Vibe</h3>
               <div className="my-4 flex flex-col items-center">
                 <div className={`w-32 h-32 rounded-full flex items-center justify-center mb-3 ${riskLabel === 'Extremely High Risk' ? 'animate-pulse' : ''}`} style={{ background: riskLabel === 'Low Risk' ? 'linear-gradient(135deg,#60a5fa,#06b6d4)' : riskLabel === 'Moderate Risk' ? 'linear-gradient(135deg,#f59e0b,#fb923c)' : 'linear-gradient(135deg,#ef4444,#b91c1c)' }}>
-                  <div className="w-28 h-28 bg-slate-900 rounded-full flex items-center justify-center text-3xl">👤</div>
+                  <div className="w-28 h-28 bg-slate-900 rounded-full flex items-center justify-center text-3xl">
+                    {riskLabel === 'Extremely High Risk' ? '😈' : riskLabel === 'High Risk' ? '😵' : riskLabel === 'Moderate Risk' ? '😐' : '🙂'}
+                  </div>
                 </div>
                 <div className="text-sm text-gray-300"><strong className="text-white">{riskLabel}</strong></div>
                 <div className="mt-2 text-xs text-gray-400">Based on last 30 days</div>
