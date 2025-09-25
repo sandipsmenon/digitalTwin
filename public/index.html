@@ -4,13 +4,28 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Digital Twin App</title>
+
+    <!-- Load Tailwind CDN early so styles are available on first paint -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap">
+
     <style>
       /* Ensure full-bleed black background on mobile devices and comfortable default font sizing */
       html, body, #root { height: 100%; background: #000; }
-      body { margin: 0; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+      body { margin: 0; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; font-family: Inter, system-ui, sans-serif; }
+
+      /* prevent flash by hiding until Tailwind is ready (Tailwind loads synchronously here) */
+      .app-hidden { visibility: hidden; }
     </style>
   </head>
-  <body>
+  <body class="app-hidden">
     <div id="root"></div>
+    <noscript>
+      <div style="color:#fff;background:#111;padding:16px;text-align:center;">This app requires JavaScript. Please enable JavaScript and reload.</div>
+    </noscript>
+    <script>
+      // Remove the hidden class once the page is loaded so the app appears only after styles are available
+      window.addEventListener('DOMContentLoaded', function() { document.body.classList.remove('app-hidden'); });
+    </script>
   </body>
 </html>
