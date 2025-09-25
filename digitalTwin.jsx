@@ -6,7 +6,7 @@ import React, { useEffect, useState, useMemo, useRef } from 'react';
 // - Dynamically loads Tailwind and Chart.js
 // - Chatbot uses Gemini API if key is provided, otherwise returns mock responses
 
-const GEMINI_API_KEY = ""; // Provide key in environment if available
+const GEMINI_API_KEY = "AIzaSyC6sm0U4LEfc7YRofjkEbQMNuL8P7IAO0s"; // Inserted per user request. Consider using env vars for security.
 
 const defaultCategories = [
   'Food','Subscriptions','Transport','Fun','Health','Needs','Wants','Gambling','High-Risk Investments','Investment','Pension','Education','Savings','Travel'
@@ -34,21 +34,28 @@ const DigitalTwin = () => {
   const [selectedPersona, setSelectedPersona] = useState('Current You');
   const [chatInput, setChatInput] = useState('');
   const [chatHistory, setChatHistory] = useState([]);
+  const [isChatLoading, setIsChatLoading] = useState(false);
   const [isChartLoaded, setIsChartLoaded] = useState(false);
   const chartRef = useRef(null);
   const chartInstance = useRef(null);
+  const chatContainerRef = useRef(null);
 
   // Load Tailwind + font for quick styling
   useEffect(() => {
-    const tail = document.createElement('link');
-    tail.rel = 'stylesheet';
-    tail.href = 'https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css';
-    document.head.appendChild(tail);
+    // Use the official Tailwind CDN script which provides the newer utility syntax (e.g. bg-slate-700/60)
+    const tailScript = document.createElement('script');
+    tailScript.src = 'https://cdn.tailwindcss.com';
+    document.head.appendChild(tailScript);
     const f = document.createElement('link');
     f.rel = 'stylesheet';
     f.href = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap';
     document.head.appendChild(f);
     document.documentElement.style.scrollBehavior = 'smooth';
+
+    // Force a solid black background at the document level to avoid transparency issues
+    document.documentElement.style.backgroundColor = '#000';
+    document.body.style.backgroundColor = '#000';
+    document.body.style.backgroundImage = 'none';
   }, []);
 
   // Load Chart.js dynamically
@@ -256,9 +263,36 @@ const DigitalTwin = () => {
     'Evil Twin': "You are a mischievous advisor encouraging risky fun. Always include a disclaimer: not financial advice."
   };
 
+  // Helper to limit text to a maximum number of lines (newline or sentence-based)
+  const shortenToMaxLines = (text, maxLines = 3) => {
+    if (!text) return text;
+    // Normalize whitespace
+    const normalized = String(text).trim().replace(/\r\n/g, '\n');
+    const lines = normalized.split('\n').map(l => l.trim()).filter(Boolean);
+    if (lines.length >= maxLines) return lines.slice(0, maxLines).join('\n');
+
+    // If fewer lines but very long, split into sentences and aggregate into lines
+    const sentences = normalized.split(/(?<=[.!?])\s+/);
+    const resultLines = [];
+    let current = '';
+    for (const s of sentences) {
+      if (!current) current = s.trim();
+      else current += ' ' + s.trim();
+      // If current is long enough or ends with punctuation, push as a line
+      if (current.length > 120 || /[.!?]$/.test(current)) {
+        resultLines.push(current);
+        current = '';
+      }
+      if (resultLines.length >= maxLines) break;
+    }
+    if (resultLines.length < maxLines && current) resultLines.push(current);
+    return resultLines.slice(0, maxLines).join('\n');
+  };
+
   const callGeminiAPI = async (userPrompt) => {
     if (!GEMINI_API_KEY) {
-      return { text: `(No Gemini API key) Mock reply for: ${userPrompt}`, sources: [] };
+      const mock = `(No Gemini API key) Mock reply for: ${userPrompt}`;
+      return { text: shortenToMaxLines(mock, 3), sources: [] };
     }
 
     const systemPrompt = personas[selectedPersona] || personas['Current You'];
@@ -271,21 +305,36 @@ const DigitalTwin = () => {
       const cand = json.candidates?.[0];
       const text = cand?.content?.parts?.[0]?.text || 'No response';
       const sources = cand?.groundingMetadata?.groundingAttributions?.map(a => ({ title: a.web?.title, uri: a.web?.uri })).filter(Boolean) || [];
-      return { text, sources };
+      return { text: shortenToMaxLines(text, 3), sources };
     } catch (e) {
       console.warn(e);
-      return { text: 'Error contacting Gemini.', sources: [] };
+      return { text: shortenToMaxLines('Error contacting Gemini. Please try again later.', 3), sources: [] };
     }
   };
 
   const sendChat = async (question) => {
-    if (!question || !String(question).trim()) return;
+    if (!question || !String(question).trim() || isChatLoading) return;
     const userMsg = { role: 'user', personaName: 'You', text: question };
     setChatHistory(prev => [...prev, userMsg]);
     setChatInput('');
-    const bot = await callGeminiAPI(question);
-    setChatHistory(prev => [...prev, { role: 'bot', personaName: selectedPersona, text: bot.text, sources: bot.sources }]);
+    setIsChatLoading(true);
+
+    try {
+      const bot = await callGeminiAPI(question);
+      setChatHistory(prev => [...prev, { role: 'bot', personaName: selectedPersona, text: bot.text, sources: bot.sources }]);
+    } catch (e) {
+      setChatHistory(prev => [...prev, { role: 'bot', personaName: selectedPersona, text: 'Error fetching response. Please try again.' }]);
+    } finally {
+      setIsChatLoading(false);
+    }
   };
+
+  // Auto-scroll chat container when history updates
+  useEffect(() => {
+    if (chatContainerRef && chatContainerRef.current) {
+      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+    }
+  }, [chatHistory]);
 
   const presetQuestions = ['Gambling problem?', 'Investments?', "How's my lifestyle?", 'How to save more?'];
 
@@ -307,7 +356,7 @@ const DigitalTwin = () => {
   };
 
   return (
-    <div className="min-h-screen bg-slate-900 text-gray-100 p-4" style={{ fontFamily: 'Inter, system-ui, sans-serif' }}>
+    <div className="min-h-screen bg-black text-gray-100 p-4" style={{ fontFamily: 'Inter, system-ui, sans-serif', backgroundColor: '#000' }}>
       <div className="max-w-5xl mx-auto">
         <header className="text-center py-8">
           <h1 className="text-4xl md:text-6xl font-extrabold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-cyan-400">Digital Twin</h1>
@@ -322,11 +371,11 @@ const DigitalTwin = () => {
               <h2 className="text-2xl font-semibold mb-4">Log a Transaction</h2>
               <form onSubmit={handleSubmit} className="space-y-4">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  <input name="amount" value={form.amount} onChange={handleInput} placeholder="Amount (£)" type="number" className="p-2 rounded-lg bg-slate-700/60 text-gray-100" required />
-                  <select name="category" value={form.category} onChange={handleInput} className="p-2 rounded-lg bg-slate-700/60 text-gray-100">
+                  <input name="amount" value={form.amount} onChange={handleInput} placeholder="Amount (£)" type="number" className="p-2 rounded-lg bg-slate-800 text-white" required />
+                  <select name="category" value={form.category} onChange={handleInput} className="p-2 rounded-lg bg-slate-800 text-white">
                     {defaultCategories.map(c => <option key={c}>{c}</option>)}
                   </select>
-                  <input name="date" type="date" value={form.date} onChange={handleInput} className="p-2 rounded-lg bg-slate-700/60 text-gray-100" />
+                  <input name="date" type="date" value={form.date} onChange={handleInput} className="p-2 rounded-lg bg-slate-800 text-white" />
                 </div>
                 <div className="flex gap-3">
                   <button type="submit" className="px-4 py-2 rounded-lg bg-gradient-to-r from-blue-500 to-cyan-500 font-semibold">{editingId ? 'Update' : 'Add Transaction'}</button>
@@ -394,18 +443,44 @@ const DigitalTwin = () => {
                 ))}
               </div>
 
-              <div className="h-40 overflow-auto mb-3 p-2 bg-slate-900/60 rounded">
-                {chatHistory.map((m,i)=> (
-                  <div key={i} className={`mb-2 ${m.role==='user' ? 'text-right':'text-left'}`}>
-                    <div className={`inline-block px-3 py-2 rounded ${m.role==='user' ? 'bg-slate-700 text-white':'bg-slate-600 text-white'}` }>{m.personaName}: {m.text}</div>
-                    {m.sources && m.sources.length>0 && <div className="text-xs text-gray-400">Sources: {m.sources.map(s=> <a key={s.uri} href={s.uri} className="underline ml-1" target="_blank" rel="noreferrer">{s.title||s.uri}</a>)}</div>}
-                  </div>
-                ))}
+              <div className="h-64 md:h-80 overflow-auto mb-3 p-2 bg-slate-900 rounded">
+                <div ref={chatContainerRef} className="space-y-3">
+                  {chatHistory.map((m,i) => (
+                    <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                      <div className="max-w-[80%]">
+                        <div className="text-xs text-gray-400 mb-1">{m.personaName}</div>
+                        <div className={`px-3 py-2 rounded-lg break-words whitespace-pre-wrap ${m.role === 'user' ? 'bg-slate-700 text-white rounded-br-md' : 'bg-slate-600 text-white rounded-bl-md'}`}>
+                          {m.text}
+                        </div>
+                        {m.sources && m.sources.length > 0 && (
+                          <div className="text-xs text-gray-400 mt-1">
+                            Sources:
+                            <ul>
+                              {m.sources.map((s, idx) => (
+                                <li key={idx}><a href={s.uri} target="_blank" rel="noreferrer" className="underline ml-1">{s.title || s.uri}</a></li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  {isChatLoading && (
+                    <div className="flex justify-start">
+                      <div className="max-w-[80%]">
+                        <div className="text-xs text-gray-400 mb-1">{selectedPersona}</div>
+                        <div className="px-3 py-2 rounded-lg bg-slate-600 text-white italic opacity-90">Thinking<span className="ml-2">⠂⠂⠂</span></div>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
 
               <div className="flex gap-2">
-                <input value={chatInput} onChange={(e)=>setChatInput(e.target.value)} onKeyDown={(e)=>e.key==='Enter' && sendChat(chatInput)} className="flex-1 p-2 rounded bg-slate-700/60 text-gray-100" placeholder={`Ask your ${selectedPersona}...`} />
-                <button onClick={()=>sendChat(chatInput)} className="px-3 py-2 rounded bg-gradient-to-r from-blue-500 to-cyan-500">Send</button>
+                <input disabled={isChatLoading} value={chatInput} onChange={(e)=>setChatInput(e.target.value)} onKeyDown={(e)=>e.key==='Enter' && sendChat(chatInput)} className={`flex-1 p-2 rounded ${isChatLoading ? 'bg-slate-700/50 text-gray-400' : 'bg-slate-800 text-white'}`} placeholder={`Ask your ${selectedPersona}...`} />
+                <button disabled={isChatLoading} onClick={()=>sendChat(chatInput)} className={`px-3 py-2 rounded ${isChatLoading ? 'bg-slate-700/50 text-gray-400' : 'bg-gradient-to-r from-blue-500 to-cyan-500'}`}>
+                  {isChatLoading ? 'Thinking...' : 'Send'}
+                </button>
               </div>
             </div>
           </aside>
