@@ -72,21 +72,31 @@ const DigitalTwin = () => {
       }
 
       try {
-        // dynamic import of firebase modules
-        const { initializeApp } = await import('https://www.gstatic.com/firebasejs/9.22.1/firebase-app.js');
-        const authMod = await import('https://www.gstatic.com/firebasejs/9.22.1/firebase-auth.js');
-        const dbMod = await import('https://www.gstatic.com/firebasejs/9.22.1/firebase-firestore.js');
-        const app = initializeApp(cfg);
-        const auth = authMod.getAuth(app);
-        const db = dbMod.getFirestore(app);
+        // Load Firebase compat scripts (global namespace) to avoid bundler import issues
+        await loadScript('https://www.gstatic.com/firebasejs/9.22.1/firebase-app-compat.js');
+        await loadScript('https://www.gstatic.com/firebasejs/9.22.1/firebase-auth-compat.js');
+        await loadScript('https://www.gstatic.com/firebasejs/9.22.1/firebase-firestore-compat.js');
+
+        const fb = window.firebase;
+        if (!fb) throw new Error('Firebase global not found');
+
+        // Initialize app (if not already)
+        try {
+          fb.app();
+        } catch (e) {
+          fb.initializeApp(cfg);
+        }
+
+        const auth = fb.auth();
+        const db = fb.firestore();
         setFirebaseClient({ auth, db });
 
-        authMod.onAuthStateChanged(auth, async (user) => {
+        auth.onAuthStateChanged(async (user) => {
           if (user) setUserId(user.uid);
           else {
             try {
-              if (token) await authMod.signInWithCustomToken(auth, token);
-              else await authMod.signInAnonymously(auth);
+              if (token) await auth.signInWithCustomToken(token);
+              else await auth.signInAnonymously();
             } catch (e) {
               console.warn('Firebase auth failed, using local mode', e);
               const uid = localStorage.getItem('digital-twin:local-user-id') || `local-${Math.random().toString(36).slice(2,9)}`;
@@ -117,17 +127,14 @@ const DigitalTwin = () => {
     };
 
     if (firebaseClient && firebaseClient.db && userId) {
-      (async () => {
-        try {
-          const { collection, query, onSnapshot } = await import('https://www.gstatic.com/firebasejs/9.22.1/firebase-firestore.js');
-          const q = query(collection(firebaseClient.db, `artifacts/digital-twin/users/${userId}/transactions`));
-          const unsubscribe = onSnapshot(q, snap => {
-            const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-            setTransactions(docs);
-          }, (err) => { console.warn('Firestore snapshot error', err); loadLocal(); });
-          return () => unsubscribe();
-        } catch (e) { console.warn(e); loadLocal(); }
-      })();
+      try {
+        const collRef = firebaseClient.db.collection(`artifacts/digital-twin/users/${userId}/transactions`);
+        const unsubscribe = collRef.onSnapshot((snap) => {
+          const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+          setTransactions(docs);
+        }, (err) => { console.warn('Firestore snapshot error', err); loadLocal(); });
+        return () => unsubscribe();
+      } catch (e) { console.warn(e); loadLocal(); }
     } else {
       loadLocal();
     }
@@ -183,8 +190,8 @@ const DigitalTwin = () => {
   const saveToBackend = async (tx) => {
     if (firebaseClient && firebaseClient.db) {
       try {
-        const { collection, addDoc } = await import('https://www.gstatic.com/firebasejs/9.22.1/firebase-firestore.js');
-        await addDoc(collection(firebaseClient.db, `artifacts/digital-twin/users/${userId}/transactions`), tx);
+        const coll = firebaseClient.db.collection(`artifacts/digital-twin/users/${userId}/transactions`);
+        await coll.add(tx);
         return;
       } catch (e) { console.warn('Firestore save failed', e); }
     }
@@ -195,8 +202,8 @@ const DigitalTwin = () => {
   const updateBackend = async (id, tx) => {
     if (firebaseClient && firebaseClient.db) {
       try {
-        const { doc, setDoc } = await import('https://www.gstatic.com/firebasejs/9.22.1/firebase-firestore.js');
-        await setDoc(doc(firebaseClient.db, `artifacts/digital-twin/users/${userId}/transactions`, id), tx);
+        const docRef = firebaseClient.db.collection(`artifacts/digital-twin/users/${userId}/transactions`).doc(id);
+        await docRef.set(tx);
         return;
       } catch (e) { console.warn('Firestore update failed', e); }
     }
@@ -206,8 +213,8 @@ const DigitalTwin = () => {
   const deleteFromBackend = async (id) => {
     if (firebaseClient && firebaseClient.db) {
       try {
-        const { doc, deleteDoc } = await import('https://www.gstatic.com/firebasejs/9.22.1/firebase-firestore.js');
-        await deleteDoc(doc(firebaseClient.db, `artifacts/digital-twin/users/${userId}/transactions`, id));
+        const docRef = firebaseClient.db.collection(`artifacts/digital-twin/users/${userId}/transactions`).doc(id);
+        await docRef.delete();
         return;
       } catch (e) { console.warn('Firestore delete failed', e); }
     }
